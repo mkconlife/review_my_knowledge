@@ -171,10 +171,69 @@ def configure():
     logger.info(f"目标目录: {target_dir}")
     logger.info(f"待传输文件: {settings['files']}")
 
-    # 复制文件
+    # 先复制 settings.txt 到插件目录
+    copy_settings_to_plugin(settings_path, target_dir, use_docker)
+
+    # 复制复习册文件
     copy_files_to_plugin(settings['files'], target_dir, use_docker)
 
     logger.info("配置完成!")
+
+
+def copy_settings_to_plugin(settings_path: str, target_dir: str, use_docker: bool = False, container_name: str = "astrbot"):
+    """
+    将 settings.txt 复制到插件目录
+    Docker 模式下使用 docker cp 命令避免权限问题
+    """
+    import subprocess
+
+    dest_path = f"{target_dir}/settings.txt"
+
+    if use_docker:
+        # Docker 模式下，使用 docker cp 命令
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", container_name],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                logger.error(f"容器 {container_name} 不存在或未运行")
+                return
+        except FileNotFoundError:
+            logger.error("未找到 docker 命令，请确保 Docker 已安装")
+            return
+        except subprocess.TimeoutExpired:
+            logger.error("Docker 命令超时")
+            return
+
+        try:
+            subprocess.run(
+                ["docker", "cp", settings_path, f"{container_name}:{dest_path}"],
+                capture_output=True, text=True, timeout=30, check=True
+            )
+            logger.info(f"[Docker] 已复制: settings.txt -> {container_name}:{dest_path}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"复制 settings.txt 失败: {e.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            logger.error("复制 settings.txt 超时")
+    else:
+        # 本地模式
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            shutil.copy2(settings_path, dest_path)
+            logger.info(f"[本地] 已复制: settings.txt -> {target_dir}")
+        except PermissionError:
+            try:
+                subprocess.run(
+                    ["sudo", "cp", settings_path, dest_path],
+                    capture_output=True, timeout=10, check=True
+                )
+                logger.info(f"[本地] 使用 sudo 复制: settings.txt -> {target_dir}")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                logger.error(f"复制 settings.txt 失败: {e}")
+                logger.error("提示: 请手动修复目标目录权限或使用 sudo 运行此脚本")
+        except Exception as e:
+            logger.error(f"复制 settings.txt 失败: {e}")
 
 
 if __name__ == "__main__":
