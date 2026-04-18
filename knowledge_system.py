@@ -1843,7 +1843,7 @@ class KnowledgeSystem:
 
         return results
     
-    async def generate_and_update_explanation(self, kb_name: str, entry_id: str) -> Dict:
+    async def generate_and_update_explanation(self, kb_name: str, entry_id: str, umo=None) -> Dict:
         """
         为指定条目生成解析并更新数据库
         返回: {'success': bool, 'explanation': str, 'error': str}
