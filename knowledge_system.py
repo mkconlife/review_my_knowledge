@@ -1115,6 +1115,11 @@ class LLMJudge:
             safe_question = sanitize_for_prompt(question, 1000)
             safe_answer = sanitize_for_prompt(answer, 500)
             
+            # 检查清理后的内容是否为空
+            if not safe_question or not safe_answer:
+                logger.warning(f"题目或答案为空，无法生成解析。question: '{safe_question}', answer: '{safe_answer}'")
+                return None
+            
             prompt = LLM_GENERATE_EXPLANATION_PROMPT.format(
                 subject=safe_subject,
                 question_type=safe_q_type,
@@ -1122,27 +1127,41 @@ class LLMJudge:
                 answer=safe_answer
             )
             
-            # 添加超时保护
-            llm_resp = await asyncio.wait_for(
-                prov.text_chat(
-                    prompt=prompt,
-                    system_prompt="你是一位专业的高中教师，擅长为学生编写清晰、详细的题目解析。"
-                ),
-                timeout=120.0  # 2分钟超时
-            )
+            logger.debug(f"LLM 生成解析 prompt 长度: {len(prompt)}")
             
-            response_text = llm_resp.completion_text.strip()
+            # 添加超时保护和重试
+            max_retries = 2
+            last_error = None
             
-            if not response_text:
-                logger.warning("LLM 返回空解析")
-                return None
+            for attempt in range(max_retries):
+                try:
+                    llm_resp = await asyncio.wait_for(
+                        prov.text_chat(
+                            prompt=prompt,
+                            system_prompt="你是一位专业的高中教师，擅长为学生编写清晰、详细的题目解析。"
+                        ),
+                        timeout=120.0  # 2分钟超时
+                    )
+                    
+                    logger.debug(f"LLM 响应对象属性: {dir(llm_resp)}")
+                    response_text = llm_resp.completion_text.strip()
+                    
+                    if not response_text:
+                        logger.warning(f"LLM 返回空解析 (尝试 {attempt + 1}/{max_retries})，响应对象: {llm_resp}")
+                        last_error = "LLM 返回空响应"
+                        continue
+                    
+                    logger.info(f"LLM 生成解析成功，长度: {len(response_text)}")
+                    return response_text
+                    
+                except asyncio.TimeoutError:
+                    logger.warning(f"LLM 生成解析超时 (尝试 {attempt + 1}/{max_retries})")
+                    last_error = "LLM 调用超时"
+                    continue
             
-            logger.info(f"LLM 生成解析成功，长度: {len(response_text)}")
-            return response_text
-            
-        except asyncio.TimeoutError:
-            logger.warning("LLM 生成解析超时")
+            logger.error(f"LLM 生成解析失败，已重试 {max_retries} 次: {last_error}")
             return None
+            
         except Exception as e:
             logger.error(f"LLM 生成解析错误: {e}")
             return None
