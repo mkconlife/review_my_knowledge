@@ -1,0 +1,6 @@
+[DATABASE]
+FILES="键入文件名","键入文件名","键入文件名"
+DESCRIPTION="键入描述","键入描述","键入描述"
+
+[INSTALLATION]
+PATH=/home/mkconlife/astrbot

@@ -1,0 +1,9 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Excluded files
+except/
+chemistry.txt
+AGENTS.md

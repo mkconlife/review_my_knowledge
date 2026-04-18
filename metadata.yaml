@@ -1,0 +1,7 @@
+name: review_my_knowledge
+desc: 知识点复习助手，支持单填空、多填空、判断题等多种题型的智能判定
+version: 2.2.1
+author: mkconlife
+repo: https://github.com/mkconlife/astrbot_plugin_knowledge
+display_name: 知识点复习助手
+astrbot_version: ">=4.16,<5"
