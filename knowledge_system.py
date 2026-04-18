@@ -1043,8 +1043,7 @@ class LLMJudge:
             llm_resp = await asyncio.wait_for(
                 prov.text_chat(
                     prompt=prompt,
-                    system_prompt="你是一位严谨的教师，专门判定学生答案的正确性。请只输出JSON格式结果。",
-                    max_tokens=500
+                    system_prompt="你是一位严谨的教师，专门判定学生答案的正确性。请只输出JSON格式结果。"
                 ),
                 timeout=120.0  # 2分钟超时
             )
@@ -1127,8 +1126,7 @@ class LLMJudge:
             llm_resp = await asyncio.wait_for(
                 prov.text_chat(
                     prompt=prompt,
-                    system_prompt="你是一位专业的高中教师，擅长为学生编写清晰、详细的题目解析。",
-                    max_tokens=800
+                    system_prompt="你是一位专业的高中教师，擅长为学生编写清晰、详细的题目解析。"
                 ),
                 timeout=120.0  # 2分钟超时
             )
@@ -1200,8 +1198,7 @@ class LLMJudge:
             llm_resp = await asyncio.wait_for(
                 prov.text_chat(
                     prompt=prompt,
-                    system_prompt="你是一位严谨的教师，专门判定多填空题。请只输出JSON格式结果。",
-                    max_tokens=800
+                    system_prompt="你是一位严谨的教师，专门判定多填空题。请只输出JSON格式结果。"
                 ),
                 timeout=120.0  # 2分钟超时
             )
