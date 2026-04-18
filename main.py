@@ -405,6 +405,38 @@ class KnowledgePlugin(Star):
             logger.error(f"搜索知识点失败: {e}")
             yield event.plain_result(f"搜索知识点失败: {str(e)}")
 
+    @filter.command("生成解析")
+    async def generate_explanation(self, event: AstrMessageEvent, kb_name: str = "", entry_id: str = ""):
+        '''生成解析。用法: /生成解析 <复习册名> <条目ID>'''
+        if not kb_name or not entry_id:
+            yield event.plain_result("用法: /生成解析 <复习册名> <条目ID>\n例如: /生成解析 化学复习 Q_abc123def4")
+            return
+
+        try:
+            yield event.plain_result(f"正在为条目 {entry_id} 生成解析，请稍候...")
+
+            result = await self.kb_system.generate_and_update_explanation(kb_name, entry_id)
+
+            if result.get('success'):
+                msg = f"解析生成成功\n" + "=" * 30 + "\n"
+                msg += f"条目ID: {entry_id}\n"
+                msg += f"复习册: {kb_name}\n\n"
+                msg += f"解析内容:\n{result['explanation']}"
+                yield event.plain_result(self._truncate_message(msg))
+            else:
+                error_msg = result.get('error', '未知错误')
+                if '已有解析' in error_msg:
+                    msg = f"该条目已有解析\n" + "=" * 30 + "\n"
+                    msg += f"现有解析: {result.get('existing_explanation', '')}\n\n"
+                    msg += "如需重新生成，请先手动清空该条目的解析内容"
+                    yield event.plain_result(self._truncate_message(msg))
+                else:
+                    yield event.plain_result(f"生成解析失败: {error_msg}")
+
+        except Exception as e:
+            logger.error(f"生成解析失败: {e}")
+            yield event.plain_result(f"生成解析失败: {str(e)}")
+
     # ==================== 保留旧命令 ====================
 
     @filter.command("我的统计")
