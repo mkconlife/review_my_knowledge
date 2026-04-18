@@ -1,0 +1,2 @@
+# review_my_knowledge
+一个基于Python的Astrbot插件，旨在帮助用户回顾复习知识点
