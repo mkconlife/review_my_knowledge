@@ -1,7 +1,7 @@
 import os
 import re
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
 from .knowledge_system import KnowledgeSystem
 
@@ -10,7 +10,7 @@ class KnowledgePlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-        self.data_dir = os.path.join(context.data_dir, "knowledge_plugin")
+        self.data_dir = StarTools.get_data_dir("review_my_knowledge")
         os.makedirs(self.data_dir, exist_ok=True)
 
         config = context.get_config()
@@ -47,7 +47,10 @@ class KnowledgePlugin(Star):
 
     def _get_user_name(self, event: AstrMessageEvent) -> str:
         """获取用户名"""
-        return event.get_sender_name() or event.get_sender_id()
+        name = event.get_sender_name() or event.get_sender_id()
+        if not name:
+            name = f"unknown_{event.session_id or 'default'}"
+        return name
 
     # ==================== 新命令 ====================
 
@@ -161,7 +164,8 @@ class KnowledgePlugin(Star):
                 yield event.plain_result(
                     f"答案数量不匹配：共有 {len(all_pending)} 道题目待回答，"
                     f"您提供了 {len(parsed_answers)} 个答案\n"
-                    f"请使用格式：1.答案1\n2.答案2\n3.答案3..."
+                    f"请使用格式：1.答案1\n2.答案2\n3.答案3...\n"
+                    f"请重新使用 /作答 <答案> 提交正确答案"
                 )
                 return
 
@@ -328,7 +332,7 @@ class KnowledgePlugin(Star):
             count = 10
 
         try:
-            results = await self.kb_system.start_knowledge_review(kb_name, count, user_name)
+            results = await self.kb_system.start_knowledge_review(kb_name, count, user_name, session_id)
 
             if not results:
                 yield event.plain_result(f"复习册 {kb_name} 暂无可复习的知识点")
@@ -337,23 +341,6 @@ class KnowledgePlugin(Star):
             if results and 'error' in results[0]:
                 yield event.plain_result(results[0]['error'])
                 return
-
-            # 清理旧记录并将展示的条目添加到 pending_questions（answered=1）
-            # 这样 /生成解析 可以获取到最近复习的条目
-            await self.kb_system.db.clear_pending(session_id)
-            for item in results:
-                # 构建一个 entry dict 用于 add_pending
-                entry = {
-                    'id': item['id'],
-                    'kb_name': kb_name,
-                    'content': item['content'],
-                    'answers': item.get('answers', []),
-                    'explanation': item.get('explanation', ''),
-                    'subject': item.get('subject', '通用'),
-                    'question_type': item.get('question_type', '单填空'),
-                }
-                # 添加到 pending_questions，直接标记为 answered=1
-                await self.kb_system.db.add_pending(session_id, entry, answered=True)
 
             msg = f"知识点复习 【{kb_name}】\n" + "=" * 30 + "\n"
             for item in results:

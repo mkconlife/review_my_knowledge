@@ -399,10 +399,11 @@ def copy_files_to_plugin(files: list, target_dir: str, use_docker: bool = False)
 
         try:
             if use_docker:
-                # Docker 模式下，可能需要使用 docker cp 或卷挂载
-                # 这里假设已通过卷挂载，直接复制
+                # Docker 模式下，假设已通过卷挂载，直接复制
+                # 注意：如果卷未正确挂载，文件会复制到容器内临时路径
                 shutil.copy2(source, dest)
                 logger.info(f"[Docker] 已复制: {filename}")
+                logger.warning(f"[Docker] 请确保 Docker 卷已正确挂载到 {target_dir}")
             else:
                 shutil.copy2(source, dest)
                 logger.info(f"[本地] 已复制: {filename} -> {target_dir}")
@@ -625,7 +626,7 @@ def main():
             print("警告: 未设置 PATH，请手动编辑 settings.txt")
 
     # 6. 生成文件复制说明
-    files_to_copy = ['transfer.py', 'settings.txt', 'configure.py', 'tool_simple.py']
+    files_to_copy = ['transfer.py', 'settings.txt', 'configure.py']
     dest_dir = os.path.join(install_path if install_path else '<AstrBot目录>', 'data', 'plugins', 'review_my_knowledge')
     copy_instructions = generate_copy_instructions(os_type, plugin_dir, dest_dir, files_to_copy)
     print(copy_instructions)
