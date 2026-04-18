@@ -1269,6 +1269,91 @@ class KnowledgeSystem:
     async def initialize(self):
         """异步初始化"""
         await self.db.init_db()
+        # 从 settings.txt 配置的 txt 文件导入数据
+        await self._import_from_settings()
+    
+    async def _import_from_settings(self):
+        """从 settings.txt 配置的 txt 文件导入数据"""
+        try:
+            # 读取 settings.txt
+            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.txt")
+            if not os.path.exists(settings_path):
+                logger.warning("settings.txt 不存在，跳过数据导入")
+                return
+            
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(settings_path, encoding='utf-8')
+            
+            if not cfg.has_section('DATABASE'):
+                logger.warning("settings.txt 中未找到 [DATABASE] 段")
+                return
+            
+            files_str = cfg.get('DATABASE', 'FILES', fallback='')
+            shownames_str = cfg.get('DATABASE', 'SHOWNAMES', fallback='')
+            
+            files = [f.strip('"').strip("'").strip() for f in files_str.split(',') if f.strip()]
+            shownames = [n.strip('"').strip("'").strip() for n in shownames_str.split(',') if n.strip()]
+            
+            if not files:
+                logger.info("settings.txt 中未配置 FILES，跳过数据导入")
+                return
+            
+            # 获取插件目录路径（优先使用 Docker 挂载路径）
+            plugin_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            imported_count = 0
+            for i, fname in enumerate(files):
+                # 构建文件路径
+                file_path = os.path.join(plugin_dir, fname)
+                if not os.path.exists(file_path):
+                    logger.warning(f"复习册文件不存在: {file_path}")
+                    continue
+                
+                # 优先使用 SHOWNAMES 作为 kb_name，如果没有则使用文件名
+                kb_name = shownames[i] if i < len(shownames) else os.path.splitext(fname)[0]
+                
+                # 读取并导入文件
+                success = await self._import_txt_file(file_path, kb_name)
+                imported_count += success
+            
+            if imported_count > 0:
+                logger.info(f"成功从 {imported_count} 个文件导入条目")
+            else:
+                logger.info("未有新条目导入数据库")
+                
+        except Exception as e:
+            logger.error(f"从 settings.txt 导入数据失败: {e}")
+    
+    async def _import_txt_file(self, file_path: str, kb_name: str) -> int:
+        """
+        从 txt 文件导入数据到数据库
+        返回成功导入的条目数
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 按空行分割为多个条目
+            entries_text = content.split('\n\n')
+            
+            imported = 0
+            for entry_text in entries_text:
+                if not entry_text.strip():
+                    continue
+                
+                entry = self.parse_entry(entry_text, kb_name)
+                if entry.get('valid'):
+                    success = await self.db.add_entry(entry)
+                    if success:
+                        imported += 1
+            
+            logger.info(f"从 {os.path.basename(file_path)} 导入 {imported} 个条目")
+            return imported
+            
+        except Exception as e:
+            logger.error(f"导入文件 {file_path} 失败: {e}")
+            return 0
     
     def parse_entry(self, raw_text: str, kb_name: str = '') -> Dict:
         """

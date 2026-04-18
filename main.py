@@ -56,7 +56,7 @@ class KnowledgePlugin(Star):
 
     @filter.command("列出复习册")
     async def list_books(self, event: AstrMessageEvent):
-        '''列出所有复习册。读取 settings.txt 中的 FILES 和 DESCRIPTION'''
+        '''列出所有复习册。读取 settings.txt 中的 FILES、NAMES 和 DESCRIPTION'''
         try:
             settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.txt")
 
@@ -73,9 +73,11 @@ class KnowledgePlugin(Star):
                 return
 
             files_str = cfg.get('DATABASE', 'FILES', fallback='')
+            names_str = cfg.get('DATABASE', 'SHOWNAMES', fallback='')
             desc_str = cfg.get('DATABASE', 'DESCRIPTION', fallback='')
 
             files = [f.strip('"').strip("'").strip() for f in files_str.split(',') if f.strip()]
+            names = [n.strip('"').strip("'").strip() for n in names_str.split(',') if n.strip()]
             descriptions = [d.strip('"').strip("'").strip() for d in desc_str.split(',') if d.strip()]
 
             if not files:
@@ -84,8 +86,10 @@ class KnowledgePlugin(Star):
 
             msg = "复习册列表\n" + "=" * 30 + "\n"
             for i, fname in enumerate(files):
+                # 优先使用 NAME 作为展示名称，如果没有则使用文件名
+                display_name = names[i] if i < len(names) else fname
                 desc = descriptions[i] if i < len(descriptions) else "暂无描述"
-                msg += f"\n{i+1}. 【{fname}】{desc}"
+                msg += f"\n{i+1}. 【{display_name}】{desc}"
 
             yield event.plain_result(self._truncate_message(msg))
 

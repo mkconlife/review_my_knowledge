@@ -26,16 +26,19 @@ def read_settings(settings_path: str) -> dict:
 
     result = {
         'files': [],
+        'shownames': [],
         'descriptions': [],
         'path': ''
     }
 
     if config.has_section('DATABASE'):
         files_str = config.get('DATABASE', 'FILES', fallback='')
+        shownames_str = config.get('DATABASE', 'SHOWNAMES', fallback='')
         desc_str = config.get('DATABASE', 'DESCRIPTION', fallback='')
 
         # 解析引号分隔的列表
         result['files'] = [f.strip('"').strip("'").strip() for f in files_str.split(',') if f.strip()]
+        result['shownames'] = [n.strip('"').strip("'").strip() for n in shownames_str.split(',') if n.strip()]
         result['descriptions'] = [d.strip('"').strip("'").strip() for d in desc_str.split(',') if d.strip()]
 
     if config.has_section('INSTALLATION'):
@@ -58,6 +61,53 @@ def get_plugin_target_dir(path_value: str) -> str:
     else:
         # 本地安装，直接拼接路径
         return os.path.join(path_value, "data", "plugins", PLUGIN_NAME)
+
+
+def ensure_writable(target_dir: str, files: list):
+    """
+    确保目标目录和文件对当前用户可写
+    如果目录/文件属于 root 且当前用户不是 root，尝试使用 sudo 更改权限
+    """
+    import subprocess
+
+    # 确保目录存在且可写
+    if not os.path.exists(target_dir):
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except PermissionError:
+            try:
+                subprocess.run(
+                    ["sudo", "mkdir", "-p", target_dir],
+                    timeout=30, check=True
+                )
+                logger.info(f"[权限] 使用 sudo 创建目录: {target_dir}")
+            except Exception as e:
+                logger.error(f"创建目录失败 {target_dir}: {e}")
+                return False
+    elif not os.access(target_dir, os.W_OK):
+        try:
+            subprocess.run(
+                ["sudo", "chmod", "755", target_dir],
+                timeout=30, check=True
+            )
+            logger.info(f"[权限] 已修复目录权限: {target_dir}")
+        except Exception as e:
+            logger.warning(f"修复目录权限失败 {target_dir}: {e}")
+
+    # 检查并修复已存在文件的权限
+    for filename in files:
+        dest = os.path.join(target_dir, filename)
+        if os.path.exists(dest) and not os.access(dest, os.W_OK):
+            try:
+                subprocess.run(
+                    ["sudo", "chmod", "644", dest],
+                    timeout=30, check=True
+                )
+                logger.info(f"[权限] 已修复文件权限: {dest}")
+            except Exception as e:
+                logger.warning(f"修复文件权限失败 {dest}: {e}")
+
+    return True
 
 
 def copy_files_to_plugin(files: list, target_dir: str, use_docker: bool = False, container_name: str = "astrbot"):
@@ -104,22 +154,10 @@ def copy_files_to_plugin(files: list, target_dir: str, use_docker: bool = False,
             except subprocess.TimeoutExpired:
                 logger.error(f"复制文件超时 {filename}")
     else:
-        # 本地模式，尝试直接复制
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-        except PermissionError:
-            # 如果目录创建失败，尝试使用 sudo
-            import subprocess
-            try:
-                subprocess.run(
-                    ["sudo", "mkdir", "-p", target_dir],
-                    capture_output=True, timeout=10, check=True
-                )
-                logger.info(f"[本地] 使用 sudo 创建目录: {target_dir}")
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-                logger.error(f"创建目录失败 {target_dir}: {e}")
-                logger.error("提示: 请确保目标目录有写入权限，或使用 sudo 运行此脚本")
-                return
+        # 本地模式，先确保目标目录和文件可写
+        if not ensure_writable(target_dir, files):
+            logger.error("无法修复目标目录权限，请手动执行: sudo chown -R $USER:$USER <目标目录>")
+            return
 
         for filename in files:
             source = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
@@ -138,7 +176,7 @@ def copy_files_to_plugin(files: list, target_dir: str, use_docker: bool = False,
                 try:
                     subprocess.run(
                         ["sudo", "cp", source, dest],
-                        capture_output=True, timeout=10, check=True
+                        timeout=30, check=True
                     )
                     logger.info(f"[本地] 使用 sudo 复制: {filename} -> {target_dir}")
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -217,16 +255,19 @@ def copy_settings_to_plugin(settings_path: str, target_dir: str, use_docker: boo
         except subprocess.TimeoutExpired:
             logger.error("复制 settings.txt 超时")
     else:
-        # 本地模式
+        # 本地模式，先确保可写
+        if not ensure_writable(target_dir, ["settings.txt"]):
+            logger.error("无法修复目标目录权限，请手动执行: sudo chown -R $USER:$USER <目标目录>")
+            return
+
         try:
-            os.makedirs(target_dir, exist_ok=True)
             shutil.copy2(settings_path, dest_path)
             logger.info(f"[本地] 已复制: settings.txt -> {target_dir}")
         except PermissionError:
             try:
                 subprocess.run(
                     ["sudo", "cp", settings_path, dest_path],
-                    capture_output=True, timeout=10, check=True
+                    timeout=30, check=True
                 )
                 logger.info(f"[本地] 使用 sudo 复制: settings.txt -> {target_dir}")
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:

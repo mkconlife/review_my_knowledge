@@ -454,6 +454,7 @@ def create_settings_txt(plugin_dir: str):
     settings_path = os.path.join(plugin_dir, "settings.txt")
     content = """[DATABASE]
 FILES="键入文件名","键入文件名","键入文件名"
+SHOWNAMES="键入展示名称","键入展示名称","键入展示名称"
 DESCRIPTION="键入描述","键入描述","键入描述"
 
 [INSTALLATION]
