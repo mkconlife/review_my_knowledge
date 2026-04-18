@@ -322,7 +322,7 @@ class DatabaseManager:
     @asynccontextmanager
     async def _get_conn(self):
         """获取数据库连接（每次操作创建独立连接，避免并发竞态条件）"""
-        conn = await aiosqlite.connect(self.db_path)
+        conn = await aiosqlite.connect(self.db_path, timeout=60.0)
         conn.row_factory = aiosqlite.Row
         try:
             yield conn
@@ -484,6 +484,13 @@ class DatabaseManager:
             async with conn.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_dict(r) for r in rows]
+    
+    async def get_entry_count_by_kb(self, kb_name: str) -> int:
+        """获取指定知识库的条目数量"""
+        async with self._get_conn() as conn:
+            async with conn.execute('SELECT COUNT(*) as cnt FROM entries WHERE kb_name = ?', (kb_name,)) as cursor:
+                row = await cursor.fetchone()
+                return row['cnt'] if row else 0
     
     def _row_to_dict(self, row: aiosqlite.Row) -> Dict:
         """行转字典（修复：安全解析JSON）"""
@@ -1378,8 +1385,17 @@ class KnowledgeSystem:
             # 按空行分割为多个条目
             entries_text = content.split('\n\n')
             
+            # 检查是否已导入过（避免重复导入导致超时）
+            existing_count = await self.db.get_entry_count_by_kb(kb_name)
+            if existing_count > 0:
+                logger.info(f"知识库 '{kb_name}' 已存在 {existing_count} 个条目，跳过重复导入")
+                return 0
+            
             imported = 0
-            for entry_text in entries_text:
+            total = len([e for e in entries_text if e.strip()])
+            logger.info(f"开始导入 {os.path.basename(file_path)}，共 {total} 个条目...")
+            
+            for idx, entry_text in enumerate(entries_text, 1):
                 if not entry_text.strip():
                     continue
                 
@@ -1388,8 +1404,11 @@ class KnowledgeSystem:
                     success = await self.db.add_entry(entry)
                     if success:
                         imported += 1
+                        # 每导入 10 条记录打印一次进度
+                        if imported % 10 == 0:
+                            logger.info(f"  已导入 {imported}/{total} 条...")
             
-            logger.info(f"从 {os.path.basename(file_path)} 导入 {imported} 个条目")
+            logger.info(f"从 {os.path.basename(file_path)} 成功导入 {imported} 个条目")
             return imported
             
         except Exception as e:

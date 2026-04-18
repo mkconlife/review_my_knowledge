@@ -119,7 +119,8 @@ Multi fill-in-blank format:
 
 - **No build step** - This is a Python plugin, loaded directly by AstrBot.
 - **Dependency:** `aiosqlite>=0.19.0` (see `requirements.txt`)
-- **Database:** Async SQLite via `aiosqlite`. Connection handling uses `@asynccontextmanager` with auto-commit/rollback. Uses `datetime.now(timezone.utc)` instead of deprecated `datetime.utcnow()`.
+- **Database:** Async SQLite via `aiosqlite`. Connection handling uses `@asynccontextmanager` with auto-commit/rollback. **Connection timeout is set to 60 seconds** (`aiosqlite.connect(db_path, timeout=60.0)`) to prevent `CancelledError` during large data imports. Uses `datetime.now(timezone.utc)` instead of deprecated `datetime.utcnow()`.
+- **Import Optimization:** During plugin initialization, **duplicate import detection** skips already-imported knowledge bases to avoid unnecessary timeouts. Progress logging prints every 10 entries for debugging.
 - **FTS5 Search Index:** `entries_fts` virtual table for full-text search. **Synchronization rules:**
   - **INSERT/UPDATE**: Use `INSERT OR REPLACE INTO entries_fts(rowid, content, answers, explanation) VALUES ((SELECT rowid FROM entries WHERE id = ?), ...)` to ensure precise rowid mapping.
   - **UPDATE explanation**: Use `UPDATE entries_fts SET explanation = ? WHERE rowid = (SELECT rowid FROM entries WHERE id = ?)` to avoid matching duplicate content.
