@@ -143,14 +143,10 @@ class UserLogManager:
 
         line_count = len(lines)
 
-        # 如果超过限制，保留最后一行（最新状态）
+        # 如果超过限制，执行日志轮转：丢弃所有历史，仅保留最新状态
+        # 每行都是完整 JSON 快照，无需保留历史记录
         if line_count >= self.MAX_LOG_LINES:
-            last_line = ""
-            for line in lines:
-                if line.strip():
-                    last_line = line
-            # 写入临时文件，然后原子替换
-            new_content = last_line + json.dumps(data, ensure_ascii=False) + '\n'
+            new_content = json.dumps(data, ensure_ascii=False) + '\n'
         else:
             new_content = ''.join(lines) + json.dumps(data, ensure_ascii=False) + '\n'
 
@@ -419,6 +415,14 @@ class DatabaseManager:
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_subject ON entries(subject)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_session ON pending_questions(session_id)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_review ON user_review_stats(user_name, entry_id)')
+            
+            # 创建 FTS5 全文搜索虚拟表（提升搜索性能）
+            await conn.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+                    content, answers, explanation,
+                    tokenize='unicode61'
+                )
+            ''')
     
     async def add_entry(self, entry: Dict) -> bool:
         """添加条目"""
@@ -439,6 +443,20 @@ class DatabaseManager:
                     json.dumps(entry.get('answers', []), ensure_ascii=False),
                     entry.get('explanation', '')
                 ))
+                
+                # 同步到 FTS5 表（使用 rowid 精确定位，避免 content 重复导致的多条更新）
+                try:
+                    await conn.execute('''
+                        INSERT OR REPLACE INTO entries_fts(rowid, content, answers, explanation)
+                        VALUES ((SELECT rowid FROM entries WHERE id = ?), ?, ?, ?)
+                    ''', (
+                        entry.get('id'),
+                        entry.get('content', ''),
+                        json.dumps(entry.get('answers', []), ensure_ascii=False),
+                        entry.get('explanation', '')
+                    ))
+                except Exception as fts_err:
+                    logger.warning(f"FTS5 同步失败，条目 {entry.get('id')} 将无法被搜索: {fts_err}")
                 
                 await conn.execute('''
                     INSERT OR IGNORE INTO stats (entry_id, total_ask, total_exhibit)
@@ -545,6 +563,11 @@ class DatabaseManager:
                 row = await cursor.fetchone()
                 return row['total_errors'] or 0
     
+    async def _cleanup_expired(self, conn):
+        """清理过期的 pending_questions 记录"""
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        await conn.execute('DELETE FROM pending_questions WHERE expires_at < ?', (now,))
+
     async def clear_pending(self, session_id: str):
         """清理指定 session 的所有待回答记录"""
         async with self._get_conn() as conn:
@@ -583,9 +606,8 @@ class DatabaseManager:
     async def get_pending(self, session_id: str) -> Optional[Dict]:
         """获取待回答问题（自动清理过期）"""
         async with self._get_conn() as conn:
-            # 清理过期记录（使用统一的UTC时间戳格式）
-            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
-            await conn.execute('DELETE FROM pending_questions WHERE expires_at < ?', (now,))
+            # 清理过期记录
+            await self._cleanup_expired(conn)
 
             # 获取最新未回答
             async with conn.execute('''
@@ -599,9 +621,8 @@ class DatabaseManager:
     async def get_all_pending(self, session_id: str) -> List[Dict]:
         """获取所有待回答问题（自动清理过期）"""
         async with self._get_conn() as conn:
-            # 清理过期记录（使用统一的UTC时间戳格式）
-            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
-            await conn.execute('DELETE FROM pending_questions WHERE expires_at < ?', (now,))
+            # 清理过期记录
+            await self._cleanup_expired(conn)
 
             # 获取所有未回答
             async with conn.execute('''
@@ -616,8 +637,7 @@ class DatabaseManager:
         """获取最近一次已回答的 pending 记录（用于 /生成解析）"""
         async with self._get_conn() as conn:
             # 清理过期记录
-            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
-            await conn.execute('DELETE FROM pending_questions WHERE expires_at < ?', (now,))
+            await self._cleanup_expired(conn)
             # 获取最近一次已回答的记录
             async with conn.execute('''
                 SELECT * FROM pending_questions 
@@ -716,14 +736,53 @@ class DatabaseManager:
                 return {row['entry_id']: dict(row) for row in rows}
 
     async def search_entries(self, content: str) -> List[Dict]:
-        """搜索条目（公共方法）"""
-        search_term = f"%{escape_like(content.strip())}%"
+        """搜索条目（使用 FTS5 全文搜索）"""
+        raw_term = content.strip()
+        if not raw_term:
+            return []
+        
         async with self._get_conn() as conn:
+            try:
+                # FTS5 使用原始搜索词，不需要 LIKE 转义
+                # JOIN entries 表获取完整字段（id, kb_name, category, subject, question_type 等）
+                async with conn.execute('''
+                    SELECT e.id, e.kb_name, e.category, e.subject, e.question_type,
+                           e.is_question, e.content, e.answers, e.explanation
+                    FROM entries_fts f
+                    JOIN entries e ON e.rowid = f.rowid
+                    WHERE f MATCH ?
+                    ORDER BY f.rank
+                    LIMIT 50
+                ''', (raw_term,)) as cursor:
+                    fts_rows = await cursor.fetchall()
+                    if fts_rows:
+                        # 从 FTS5 结果构建完整条目字典
+                        results = []
+                        for row in fts_rows:
+                            d = {
+                                'id': row[0],
+                                'kb_name': row[1],
+                                'category': row[2],
+                                'subject': row[3],
+                                'question_type': row[4],
+                                'is_question': row[5],
+                                'content': row[6],
+                                'answers': safe_json_loads(row[7], [], field_name='answers'),
+                                'explanation': row[8]
+                            }
+                            results.append(d)
+                        return results
+            except Exception as e:
+                logger.warning(f"FTS5 搜索失败，回退到 LIKE 查询: {e}")
+            
+            # 回退到 LIKE 查询时才需要转义
+            search_pattern = f"%{escape_like(raw_term)}%"
             async with conn.execute('''
                 SELECT * FROM entries 
                 WHERE content LIKE ? ESCAPE '\\' OR answers LIKE ? ESCAPE '\\' OR explanation LIKE ? ESCAPE '\\'
                 ORDER BY kb_name, category
-            ''', (search_term, search_term, search_term)) as cursor:
+                LIMIT 50
+            ''', (search_pattern, search_pattern, search_pattern)) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_dict(r) for r in rows]
 
@@ -742,6 +801,14 @@ class DatabaseManager:
                     'UPDATE entries SET explanation = ? WHERE id = ?',
                     (explanation, entry_id)
                 )
+                # 同步到 FTS5（使用 rowid 精确定位，避免 content 重复导致的多条更新）
+                try:
+                    await conn.execute(
+                        'UPDATE entries_fts SET explanation = ? WHERE rowid = (SELECT rowid FROM entries WHERE id = ?)',
+                        (explanation, entry_id)
+                    )
+                except Exception:
+                    pass
                 return True
         except Exception as e:
             logger.error(f"Update explanation error: {e}")
@@ -960,11 +1027,11 @@ class LLMJudge:
             
             response_text = llm_resp.completion_text.strip()
             
-            # 提取JSON
-            if '```json' in response_text:
-                json_str = response_text.split('```json')[1].split('```')[0].strip()
-            elif '```' in response_text:
-                json_str = response_text.split('```')[1].split('```')[0].strip()
+            # 提取JSON（使用 find/rfind 策略，支持嵌套对象）
+            start = response_text.find('{')
+            end = response_text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_str = response_text[start:end+1]
             else:
                 json_str = response_text
             
@@ -1117,11 +1184,11 @@ class LLMJudge:
             
             response_text = llm_resp.completion_text.strip()
             
-            # 提取JSON
-            if '```json' in response_text:
-                json_str = response_text.split('```json')[1].split('```')[0].strip()
-            elif '```' in response_text:
-                json_str = response_text.split('```')[1].split('```')[0].strip()
+            # 提取JSON（使用 find/rfind 策略，支持嵌套对象）
+            start = response_text.find('{')
+            end = response_text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_str = response_text[start:end+1]
             else:
                 json_str = response_text
             
@@ -1271,6 +1338,9 @@ class KnowledgeSystem:
                 ans_str = match.group(1).strip()
                 blanks = [b.strip() for b in ans_str.split(';')]
                 entry['answers'] = [[opt.strip()[:200] for opt in blank.split('|') if opt.strip()] for blank in blanks]
+                # 验证答案完整性，记录警告但不阻止解析
+                if any(len(a) == 0 for a in entry['answers']):
+                    logger.warning(f"条目 {entry.get('id', 'unknown')} 答案存在空元素")
                 entry['content'] = re.sub(r'\s*\[.*?\]$', '', full).strip()[:1000]
             else:
                 entry['content'] = full[:1000]
@@ -1397,7 +1467,7 @@ class KnowledgeSystem:
         for priority, ask_you, e, total_ask in selected:
             # 更新统计
             new_ask = await self.db.increment_stat(e['id'], 'total_ask')
-            user_review = await self.db.increment_user_review_ask(e['id'], user_name)
+            await self.db.increment_user_review_ask(e['id'], user_name)
             # 添加新pending（清理后保证唯一）
             await self.db.add_pending(session_id, e)
 
@@ -1425,7 +1495,7 @@ class KnowledgeSystem:
 
         return results
 
-    async def start_knowledge_review(self, kb_name: str, count: int, user_name: str) -> List[Dict]:
+    async def start_knowledge_review(self, kb_name: str, count: int, user_name: str, session_id: str = "") -> List[Dict]:
         """
         开始复习知识点
         N 上限为 10 条
@@ -1521,6 +1591,22 @@ class KnowledgeSystem:
             }
             results.append(result_item)
 
+        # 如果提供了 session_id，将展示的条目添加到 pending_questions（answered=1）
+        # 这样 /生成解析 可以获取到最近复习的条目
+        if session_id and results:
+            await self.db.clear_pending(session_id)
+            for item in results:
+                entry = {
+                    'id': item['id'],
+                    'kb_name': kb_name,
+                    'content': item['content'],
+                    'answers': item.get('answers', []),
+                    'explanation': item.get('explanation', ''),
+                    'subject': item.get('subject', '通用'),
+                    'question_type': item.get('question_type', '单填空'),
+                }
+                await self.db.add_pending(session_id, entry, answered=True)
+
         return results
 
     async def search_content(self, content: str) -> List[Dict]:
@@ -1605,6 +1691,14 @@ class KnowledgeSystem:
         if not answers:
             return '无标准答案'
         
+        # 检查是否所有答案都是空的
+        if q_type == '多填空':
+            if all(isinstance(a, list) and not a for a in answers):
+                return '无标准答案'
+        else:
+            if isinstance(answers[0], list) and not answers[0]:
+                return '无标准答案'
+        
         try:
             if q_type == '多填空':
                 if isinstance(answers[0], list):
@@ -1618,5 +1712,6 @@ class KnowledgeSystem:
             return '无标准答案'
     
     async def close(self):
-        """关闭资源"""
+        """关闭资源（数据库连接采用即用即关模式，无需额外清理）"""
+        await self.db.close()
         logger.info("知识系统资源已释放")
