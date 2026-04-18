@@ -60,32 +60,92 @@ def get_plugin_target_dir(path_value: str) -> str:
         return os.path.join(path_value, "data", "plugins", PLUGIN_NAME)
 
 
-def copy_files_to_plugin(files: list, target_dir: str, use_docker: bool = False):
+def copy_files_to_plugin(files: list, target_dir: str, use_docker: bool = False, container_name: str = "astrbot"):
     """
     将文件复制到插件目录
+    Docker 模式下使用 docker cp 命令避免权限问题
     """
-    os.makedirs(target_dir, exist_ok=True)
+    if use_docker:
+        # Docker 模式下，使用 docker cp 命令复制文件到容器
+        import subprocess
 
-    for filename in files:
-        source = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-        dest = os.path.join(target_dir, filename)
-
-        if not os.path.exists(source):
-            logger.warning(f"源文件不存在: {source}")
-            continue
-
+        # 确保容器存在
         try:
-            if use_docker:
-                # Docker 模式下，假设已通过卷挂载，直接复制
-                # 注意：如果卷未正确挂载，文件会复制到容器内临时路径
-                shutil.copy2(source, dest)
-                logger.info(f"[Docker] 已复制: {filename}")
-                logger.warning(f"[Docker] 请确保 Docker 卷已正确挂载到 {target_dir}")
-            else:
+            result = subprocess.run(
+                ["docker", "inspect", container_name],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                logger.error(f"容器 {container_name} 不存在或未运行")
+                return
+        except FileNotFoundError:
+            logger.error("未找到 docker 命令，请确保 Docker 已安装")
+            return
+        except subprocess.TimeoutExpired:
+            logger.error("Docker 命令超时")
+            return
+
+        for filename in files:
+            source = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+
+            if not os.path.exists(source):
+                logger.warning(f"源文件不存在: {source}")
+                continue
+
+            try:
+                dest_path = f"{target_dir}/{filename}"
+                subprocess.run(
+                    ["docker", "cp", source, f"{container_name}:{dest_path}"],
+                    capture_output=True, text=True, timeout=30, check=True
+                )
+                logger.info(f"[Docker] 已复制: {filename} -> {container_name}:{dest_path}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"复制文件失败 {filename}: {e.stderr.strip()}")
+            except subprocess.TimeoutExpired:
+                logger.error(f"复制文件超时 {filename}")
+    else:
+        # 本地模式，尝试直接复制
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except PermissionError:
+            # 如果目录创建失败，尝试使用 sudo
+            import subprocess
+            try:
+                subprocess.run(
+                    ["sudo", "mkdir", "-p", target_dir],
+                    capture_output=True, timeout=10, check=True
+                )
+                logger.info(f"[本地] 使用 sudo 创建目录: {target_dir}")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                logger.error(f"创建目录失败 {target_dir}: {e}")
+                logger.error("提示: 请确保目标目录有写入权限，或使用 sudo 运行此脚本")
+                return
+
+        for filename in files:
+            source = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+            dest = os.path.join(target_dir, filename)
+
+            if not os.path.exists(source):
+                logger.warning(f"源文件不存在: {source}")
+                continue
+
+            try:
                 shutil.copy2(source, dest)
                 logger.info(f"[本地] 已复制: {filename} -> {target_dir}")
-        except Exception as e:
-            logger.error(f"复制文件失败 {filename}: {e}")
+            except PermissionError:
+                # 权限不足时尝试使用 sudo cp
+                import subprocess
+                try:
+                    subprocess.run(
+                        ["sudo", "cp", source, dest],
+                        capture_output=True, timeout=10, check=True
+                    )
+                    logger.info(f"[本地] 使用 sudo 复制: {filename} -> {target_dir}")
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                    logger.error(f"复制文件失败 {filename}: {e}")
+                    logger.error("提示: 请手动修复目标目录权限或使用 sudo 运行此脚本")
+            except Exception as e:
+                logger.error(f"复制文件失败 {filename}: {e}")
 
 
 def configure():
