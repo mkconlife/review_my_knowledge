@@ -99,19 +99,17 @@ class KnowledgePlugin(Star):
 
     @filter.command("开始复习错题")
     async def start_mistake_review(self, event: AstrMessageEvent, kb_name: str = ""):
-        '''开始复习错题（单题模式）。用法: /开始复习错题 <复习册名>'''
+        '''开始复习错题（单题模式）。用法: /开始复习错题 <复习册名>（不提供则从所有复习册抽取）'''
         session_id = event.unified_msg_origin
         user_name = self._get_user_name(event)
 
-        if not kb_name:
-            kb_name = self.plugin_config.get("default_kb", "biology_mistakes")
-
+        # 如果未提供复习册名称，kb_name 保持为空，从所有复习册中抽取
         try:
             # 单题模式，固定 count=1
             results = await self.kb_system.start_mistake_review(kb_name, 1, user_name, session_id)
 
             if not results:
-                yield event.plain_result(f"复习册 {kb_name} 暂无可复习的题目")
+                yield event.plain_result(f"{'所有复习册' if not kb_name else f'复习册 {kb_name}'} 暂无可复习的题目")
                 return
 
             if results and 'error' in results[0]:
@@ -119,7 +117,8 @@ class KnowledgePlugin(Star):
                 return
 
             q = results[0]
-            msg = f"错题复习 【{kb_name}】\n" + "=" * 30 + "\n"
+            kb_display = q.get('kb_name', kb_name or '全部')
+            msg = f"错题复习 【{kb_display}】\n" + "=" * 30 + "\n"
             msg += f"\n[{q['category']}] {q['question']}\n"
             msg += f"   题型: {q['question_type']} | ID: {q['id']}\n"
             msg += f"   总提问: {q['total_ask']} | 你的提问: {q['ask_you']}\n"
@@ -257,7 +256,8 @@ class KnowledgePlugin(Star):
                 msg += f"  题目: {r['question']}\n"
                 msg += f"  你的答案: {r['user_answer']}\n"
                 msg += f"  标准答案: {r['correct_answer']}\n"
-                msg += f"  统计: 对{r['stats']['c']} 错{r['stats']['w']}\n"
+                msg += f"  你的统计: 对{r['stats']['c']} 错{r['stats']['w']}\n"
+                msg += f"  总统计: 对{r['stats']['total_c']} 错{r['stats']['total_w']}\n"
 
                 # 多填空显示逐空判定
                 if r['q_type'] == '多填空' and 'blank_results' in r['match_result']:
@@ -323,13 +323,11 @@ class KnowledgePlugin(Star):
 
     @filter.command("开始复习知识点")
     async def start_knowledge_review(self, event: AstrMessageEvent, kb_name: str = "", count: int = 1):
-        '''开始复习知识点。用法: /开始复习知识点 <复习册名> [数量N] (N<=10)'''
+        '''开始复习知识点。用法: /开始复习知识点 <复习册名> [数量N] (N<=10)（不提供复习册名则从所有复习册抽取）'''
         session_id = event.unified_msg_origin
         user_name = self._get_user_name(event)
 
-        if not kb_name:
-            kb_name = self.plugin_config.get("default_kb", "biology_mistakes")
-
+        # 如果未提供复习册名称，kb_name 保持为空，从所有复习册中抽取
         if count < 1:
             count = 1
         elif count > 10:
@@ -339,14 +337,16 @@ class KnowledgePlugin(Star):
             results = await self.kb_system.start_knowledge_review(kb_name, count, user_name, session_id)
 
             if not results:
-                yield event.plain_result(f"复习册 {kb_name} 暂无可复习的知识点")
+                yield event.plain_result(f"{'所有复习册' if not kb_name else f'复习册 {kb_name}'} 暂无可复习的知识点")
                 return
 
             if results and 'error' in results[0]:
                 yield event.plain_result(results[0]['error'])
                 return
 
-            msg = f"知识点复习 【{kb_name}】\n" + "=" * 30 + "\n"
+            # 获取显示的知识库名称
+            kb_display = results[0].get('kb_name', kb_name or '全部')
+            msg = f"知识点复习 【{kb_display}】\n" + "=" * 30 + "\n"
             for item in results:
                 msg += f"\n【{item['category']}】{item['content']}\n"
                 # 如果是回退到题目模式，显示答案

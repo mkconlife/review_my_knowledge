@@ -536,11 +536,28 @@ class DatabaseManager:
                 answer_text[:1000]  # 限制长度
             ))
             
+            # 获取用户个人统计
             async with conn.execute('''
                 SELECT w, c FROM user_records WHERE entry_id = ? AND user_name = ?
             ''', (entry_id, user_name)) as cursor:
                 row = await cursor.fetchone()
-                return {'w': row['w'], 'c': row['c']}
+                user_w = row['w'] if row else 0
+                user_c = row['c'] if row else 0
+            
+            # 获取该题总统计（所有用户）
+            async with conn.execute('''
+                SELECT SUM(c) as total_c, SUM(w) as total_w FROM user_records WHERE entry_id = ?
+            ''', (entry_id,)) as cursor:
+                total_row = await cursor.fetchone()
+                total_c = total_row['total_c'] if total_row and total_row['total_c'] else 0
+                total_w = total_row['total_w'] if total_row and total_row['total_w'] else 0
+            
+            return {
+                'w': user_w, 
+                'c': user_c,
+                'total_w': total_w,
+                'total_c': total_c
+            }
     
     async def get_user_stats(self, entry_id: str, user_name: str) -> Optional[Dict]:
         """获取用户统计"""
@@ -1325,6 +1342,30 @@ class KnowledgeSystem:
         except Exception as e:
             logger.error(f"从 settings.txt 导入数据失败: {e}")
     
+    async def get_all_kb_names(self) -> List[str]:
+        """从 settings.txt 获取所有复习册名称"""
+        try:
+            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.txt")
+            if not os.path.exists(settings_path):
+                logger.warning("settings.txt 不存在")
+                return []
+            
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(settings_path, encoding='utf-8')
+            
+            if not cfg.has_section('DATABASE'):
+                logger.warning("settings.txt 中未找到 [DATABASE] 段")
+                return []
+            
+            shownames_str = cfg.get('DATABASE', 'SHOWNAMES', fallback='')
+            shownames = [n.strip('"').strip("'").strip() for n in shownames_str.split(',') if n.strip()]
+            
+            return shownames
+        except Exception as e:
+            logger.error(f"读取复习册列表失败: {e}")
+            return []
+    
     async def _import_txt_file(self, file_path: str, kb_name: str) -> int:
         """
         从 txt 文件导入数据到数据库
@@ -1465,11 +1506,31 @@ class KnowledgeSystem:
         3. 当所有题目都抽过后，优先抽取 W > C 的条目
         4. 如果条目距上次提问 < 6小时，则不优先
         5. 仅抽取1道题目，输出包含 total_ask 和 ask_you
+        
+        参数:
+            kb_name: 复习册名称，如果为空则从所有复习册中抽取
         """
-        entries = await self.db.get_entries(kb_name, is_question=True, limit=200)
+        # 如果未指定复习册，从所有复习册中获取题目
+        if not kb_name:
+            all_kb = await self.get_all_kb_names()
+            if not all_kb:
+                return [{'error': '未配置任何复习册'}]
+            
+            # 从所有复习册中收集题目
+            all_entries = []
+            for kb in all_kb:
+                entries = await self.db.get_entries(kb, is_question=True, limit=200)
+                all_entries.extend(entries)
+            
+            if not all_entries:
+                return [{'error': '所有复习册均无匹配题目'}]
+        else:
+            all_entries = await self.db.get_entries(kb_name, is_question=True, limit=200)
+            if not all_entries:
+                return [{'error': f'复习册 {kb_name} 无匹配条目'}]
 
-        if not entries:
-            return [{'error': f'复习册 {kb_name} 无匹配条目'}]
+        if not all_entries:
+            return [{'error': '无匹配条目'}]
 
         # 确保用户日志存在
         await self.user_log._ensure_log_exists(user_name)
@@ -1478,12 +1539,12 @@ class KnowledgeSystem:
         scored_entries = []
 
         # 批量查询优化：一次性获取所有统计，避免 N+1 查询
-        entry_ids = [e['id'] for e in entries]
+        entry_ids = [e['id'] for e in all_entries]
         stats_batch = await self.db.get_stats_batch(entry_ids)
         user_review_batch = await self.db.get_user_review_stats_batch(entry_ids, user_name)
         user_records_batch = await self.db.get_user_records_batch(entry_ids, user_name)
 
-        for e in entries:
+        for e in all_entries:
             entry_id = e['id']
 
             # 获取全局统计（从批量缓存）
@@ -1575,7 +1636,8 @@ class KnowledgeSystem:
                 'question_type': q_type,
                 'question': e['content'] + ans_display,
                 'total_ask': new_ask,
-                'ask_you': ask_you
+                'ask_you': ask_you,
+                'kb_name': e.get('kb_name', kb_name or '全部')
             })
 
         return results
@@ -1587,32 +1649,55 @@ class KnowledgeSystem:
         优先展示 exhibit_you 值低的
         展示后 total_exhibit + 1, exhibit_you + 1
         如果没有纯知识点条目，回退到展示题目（同时展示答案）
+        
+        参数:
+            kb_name: 复习册名称，如果为空则从所有复习册中抽取
         """
         if count > 10:
             count = 10
         if count < 1:
             count = 1
 
-        entries = await self.db.get_entries(kb_name, is_question=False, limit=200)
-        is_question_fallback = False
+        # 如果未指定复习册，从所有复习册中获取知识点
+        if not kb_name:
+            all_kb = await self.get_all_kb_names()
+            if not all_kb:
+                return [{'error': '未配置任何复习册'}]
+            
+            # 从所有复习册中收集知识点
+            all_entries = []
+            for kb in all_kb:
+                entries = await self.db.get_entries(kb, is_question=False, limit=200)
+                all_entries.extend(entries)
+            
+            is_question_fallback = False
+            if not all_entries:
+                # 回退到题目
+                for kb in all_kb:
+                    entries = await self.db.get_entries(kb, is_question=True, limit=200)
+                    all_entries.extend(entries)
+                is_question_fallback = True
+        else:
+            all_entries = await self.db.get_entries(kb_name, is_question=False, limit=200)
+            is_question_fallback = False
 
-        if not entries:
-            entries = await self.db.get_entries(kb_name, is_question=True, limit=200)
-            is_question_fallback = True
+            if not all_entries:
+                all_entries = await self.db.get_entries(kb_name, is_question=True, limit=200)
+                is_question_fallback = True
 
-        if not entries:
-            return [{'error': f'复习册 {kb_name} 无匹配条目'}]
+        if not all_entries:
+            return [{'error': '无匹配条目'}]
 
         # 确保用户日志存在（按需求：检查用户是否存在日志，如果不存在则新建）
         await self.user_log._ensure_log_exists(user_name)
 
         # 批量获取 exhibit_you，避免 N+1 查询
-        entry_ids = [e['id'] for e in entries]
+        entry_ids = [e['id'] for e in all_entries]
         user_review_batch = await self.db.get_user_review_stats_batch(entry_ids, user_name)
 
         # 获取每个条目的 exhibit_you 并排序
         entries_with_exhibit = []
-        for e in entries:
+        for e in all_entries:
             # 从数据库获取 exhibit_you（批量缓存）
             user_stats = user_review_batch.get(e['id'])
             exhibit_you = user_stats['exhibit_you'] if user_stats else 0
@@ -1672,7 +1757,8 @@ class KnowledgeSystem:
                 'exhibit_you': exhibit_you,  # 使用排序时的原始值，保持一致性
                 'is_question_fallback': is_question_fallback,
                 'question_type': q_type,
-                'answers_display': answers_display
+                'answers_display': answers_display,
+                'kb_name': e.get('kb_name', kb_name or '全部')
             }
             results.append(result_item)
 
@@ -1683,7 +1769,7 @@ class KnowledgeSystem:
             for item in results:
                 entry = {
                     'id': item['id'],
-                    'kb_name': kb_name,
+                    'kb_name': item.get('kb_name', kb_name or '全部'),
                     'content': item['content'],
                     'answers': item.get('answers', []),
                     'explanation': item.get('explanation', ''),

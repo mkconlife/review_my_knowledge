@@ -155,6 +155,8 @@ Multi fill-in-blank format:
 
 3. Use `configure.py` to copy files to plugin directory based on installation type.
 
+> **注意：** 复习册 txt 文件（如 `chemistry_lihang.txt`、`chemistry.txt` 等）已加入 `.gitignore`，**不应上传到 GitHub**。这些文件仅本地保存，通过 Docker 容器同步。
+
 ## AstrBot Plugin Development Reference
 
 ### Plugin Structure

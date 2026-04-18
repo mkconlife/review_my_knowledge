@@ -6,4 +6,5 @@ __pycache__/
 # Excluded files
 except/
 chemistry.txt
+chemistry_lihang.txt
 AGENTS.md
