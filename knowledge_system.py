@@ -550,15 +550,22 @@ class DatabaseManager:
         async with self._get_conn() as conn:
             await conn.execute('DELETE FROM pending_questions WHERE session_id = ?', (session_id,))
 
-    async def add_pending(self, session_id: str, entry: Dict, expires_minutes: int = 30) -> int:
-        """添加待回答问题（仅插入，不清理旧记录）"""
+    async def add_pending(self, session_id: str, entry: Dict, expires_minutes: int = 30, answered: bool = False) -> int:
+        """添加待回答问题（仅插入，不清理旧记录）
+        
+        参数:
+            session_id: 会话ID
+            entry: 条目字典
+            expires_minutes: 过期时间（分钟）
+            answered: 是否已回答（默认False）
+        """
         expires = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
         expires_str = expires.strftime('%Y-%m-%dT%H:%M:%S+00:00')
         async with self._get_conn() as conn:
             cursor = await conn.execute('''
                 INSERT INTO pending_questions 
-                (session_id, kb_name, entry_id, answers, explanation, subject, content, question_type, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (session_id, kb_name, entry_id, answers, explanation, subject, content, question_type, expires_at, answered)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 session_id,
                 entry.get('kb_name', ''),
@@ -568,7 +575,8 @@ class DatabaseManager:
                 entry.get('subject', '通用'),
                 entry.get('content', ''),
                 entry.get('question_type', '单填空'),
-                expires_str
+                expires_str,
+                1 if answered else 0
             ))
             return cursor.lastrowid
     
@@ -603,6 +611,21 @@ class DatabaseManager:
             ''', (session_id,)) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_dict(r) for r in rows]
+    
+    async def get_latest_answered(self, session_id: str) -> Optional[Dict]:
+        """获取最近一次已回答的 pending 记录（用于 /生成解析）"""
+        async with self._get_conn() as conn:
+            # 清理过期记录
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+            await conn.execute('DELETE FROM pending_questions WHERE expires_at < ?', (now,))
+            # 获取最近一次已回答的记录
+            async with conn.execute('''
+                SELECT * FROM pending_questions 
+                WHERE session_id = ? AND answered = 1
+                ORDER BY created_at DESC LIMIT 1
+            ''', (session_id,)) as cursor:
+                row = await cursor.fetchone()
+                return self._row_to_dict(row) if row else None
     
     async def mark_answered(self, pending_id: int):
         """标记为已回答"""

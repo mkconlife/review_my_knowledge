@@ -316,6 +316,7 @@ class KnowledgePlugin(Star):
     @filter.command("开始复习知识点")
     async def start_knowledge_review(self, event: AstrMessageEvent, kb_name: str = "", count: int = 1):
         '''开始复习知识点。用法: /开始复习知识点 <复习册名> [数量N] (N<=10)'''
+        session_id = event.unified_msg_origin
         user_name = self._get_user_name(event)
 
         if not kb_name:
@@ -336,6 +337,23 @@ class KnowledgePlugin(Star):
             if results and 'error' in results[0]:
                 yield event.plain_result(results[0]['error'])
                 return
+
+            # 清理旧记录并将展示的条目添加到 pending_questions（answered=1）
+            # 这样 /生成解析 可以获取到最近复习的条目
+            await self.kb_system.db.clear_pending(session_id)
+            for item in results:
+                # 构建一个 entry dict 用于 add_pending
+                entry = {
+                    'id': item['id'],
+                    'kb_name': kb_name,
+                    'content': item['content'],
+                    'answers': item.get('answers', []),
+                    'explanation': item.get('explanation', ''),
+                    'subject': item.get('subject', '通用'),
+                    'question_type': item.get('question_type', '单填空'),
+                }
+                # 添加到 pending_questions，直接标记为 answered=1
+                await self.kb_system.db.add_pending(session_id, entry, answered=True)
 
             msg = f"知识点复习 【{kb_name}】\n" + "=" * 30 + "\n"
             for item in results:
@@ -366,6 +384,7 @@ class KnowledgePlugin(Star):
                         msg += f"   解析: {exp}\n"
                 msg += f"   总展示: {item['total_exhibit']} | 你的展示: {item['exhibit_you']}\n"
 
+            msg += "\n提示: 可使用 /生成解析 为当前条目生成详细解析"
             yield event.plain_result(self._truncate_message(msg))
 
         except Exception as e:
@@ -406,13 +425,27 @@ class KnowledgePlugin(Star):
             yield event.plain_result(f"搜索知识点失败: {str(e)}")
 
     @filter.command("生成解析")
-    async def generate_explanation(self, event: AstrMessageEvent, kb_name: str = "", entry_id: str = ""):
-        '''生成解析。用法: /生成解析 <复习册名> <条目ID>'''
-        if not kb_name or not entry_id:
-            yield event.plain_result("用法: /生成解析 <复习册名> <条目ID>\n例如: /生成解析 化学复习 Q_abc123def4")
-            return
+    async def generate_explanation(self, event: AstrMessageEvent):
+        '''生成解析。用法: /生成解析（在作答完毕、出示答案或复习知识点后使用）'''
+        session_id = event.unified_msg_origin
 
         try:
+            # 从已回答的 pending_questions 中获取最近一次出示的题目
+            pending = await self.kb_system.db.get_latest_answered(session_id)
+
+            if not pending:
+                yield event.plain_result(
+                    "当前无最近出示记录。\n"
+                    "请先执行以下操作之一，再使用 /生成解析：\n"
+                    "1. /开始复习错题 并 /作答\n"
+                    "2. /出示答案\n"
+                    "3. /开始复习知识点"
+                )
+                return
+
+            entry_id = pending['entry_id']
+            kb_name = pending.get('kb_name') or ''
+
             yield event.plain_result(f"正在为条目 {entry_id} 生成解析，请稍候...")
 
             result = await self.kb_system.generate_and_update_explanation(kb_name, entry_id)
